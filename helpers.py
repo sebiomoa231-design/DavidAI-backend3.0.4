@@ -1,28 +1,20 @@
 """
-Small shared helper utilities used across David AI modules.
+Utility helpers used across the backend.
 """
-import uuid
-import time
+from __future__ import annotations
+
 import hashlib
+import secrets
 from datetime import datetime, timezone
 
 
-def new_id(prefix: str = "") -> str:
-    """Generate a short unique id, optionally prefixed (e.g. 'proj_ab12cd34')."""
-    raw = uuid.uuid4().hex[:12]
-    return f"{prefix}_{raw}" if prefix else raw
-
-
 def now_iso() -> str:
-    """Current UTC timestamp in ISO 8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
-def now_ts() -> float:
-    """Current epoch timestamp (for latency / duration math)."""
-    return time.time()
+def new_id(prefix: str) -> str:
+    return f"{prefix}_{secrets.token_hex(8)}"
 
 
 def hash_text(text: str) -> str:
-    """Stable hash used for cache keys (prompt/response caching)."""
-    return hashlib.sha256(text.strip().lower().encode("utf-8")).hexdigest()
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
