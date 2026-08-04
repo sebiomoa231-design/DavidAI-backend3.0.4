@@ -13,6 +13,7 @@ from typing import List, Optional
 from david.config.settings import get_settings
 from david.core.owner import get_owner_profile
 from david.memory.memory_engine import memory_engine
+from david.conversations import record_conversation
 from david.router.ai_router import ai_router
 from david.utils.logger import get_logger
 
@@ -87,6 +88,17 @@ async def handle_chat(
             user_id=user_id,
             project_id=project_id,
             source="chat",
+        )
+
+
+    if response.success and response.text:
+        record_conversation(
+            message=message,
+            reply=response.text,
+            user_id=user_id,
+            project_id=project_id,
+            provider=response.provider,
+            task_type=task_type,
         )
 
     # 4) Return one unified reply (caller never needs to know which provider answered)

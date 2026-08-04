@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     # --- Server ---
-    SECRET_KEY: str = "change-me-to-a-long-random-secret-key-32chars-min"
+    SECRET_KEY: str = "insecure-dev-key-change-me"
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     ENV: str = "development"

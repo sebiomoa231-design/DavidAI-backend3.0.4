@@ -1,3 +1,4 @@
+from typing import Optional
 """Upload endpoints (Section 13, 23)."""
 import shutil
 from pathlib import Path
@@ -7,7 +8,7 @@ from fastapi.responses import FileResponse
 
 from david.config.settings import get_settings
 from david.database.json_store import JSONStore
-from david.security.auth import get_current_user
+from david.security.auth import get_current_user_optional
 from david.security.workspace import ensure_owner, scope_user_id
 from david.utils.helpers import new_id, now_iso
 
@@ -23,7 +24,7 @@ MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
 
 
 @router.post("")
-async def upload_file(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+async def upload_file(file: UploadFile = File(...), user: Optional[dict] = Depends(get_current_user_optional)):
     settings = get_settings()
 
     ext = Path(file.filename).suffix.lower()
@@ -46,7 +47,7 @@ async def upload_file(file: UploadFile = File(...), user: dict = Depends(get_cur
 
     record = {
         "id": upload_id,
-        "user_id": user["id"],
+        "user_id": user["id"] if user else None,
         "original_name": file.filename,
         "stored_name": stored_name,
         "content_type": file.content_type,
@@ -58,12 +59,12 @@ async def upload_file(file: UploadFile = File(...), user: dict = Depends(get_cur
 
 
 @router.get("")
-async def list_uploads(user: dict = Depends(get_current_user)):
-    return store.find(lambda u: u.get("user_id") == user["id"])
+async def list_uploads(user: Optional[dict] = Depends(get_current_user_optional)):
+    return store.find(lambda u: u.get("user_id") == (user or {}).get("id"))
 
 
 @router.get("/{stored_name}")
-async def download_upload(stored_name: str, user: dict = Depends(get_current_user)):
+async def download_upload(stored_name: str, user: Optional[dict] = Depends(get_current_user_optional)):
     settings = get_settings()
     safe_name = Path(stored_name).name
     matches = store.find(lambda u: u.get("stored_name") == safe_name)
@@ -80,7 +81,7 @@ async def download_upload(stored_name: str, user: dict = Depends(get_current_use
 
 
 @router.delete("")
-async def delete_upload(stored_name: str, user: dict = Depends(get_current_user)):
+async def delete_upload(stored_name: str, user: Optional[dict] = Depends(get_current_user_optional)):
     settings = get_settings()
     safe_name = Path(stored_name).name
     matches = store.find(lambda u: u.get("stored_name") == safe_name)
