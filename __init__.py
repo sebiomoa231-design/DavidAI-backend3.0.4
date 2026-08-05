@@ -1,1 +1,1 @@
-"""David AI package."""
+"""David AI package module."""
