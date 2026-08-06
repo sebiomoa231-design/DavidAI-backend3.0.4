@@ -1,58 +1,68 @@
-"""Conversation persistence for David AI."""
-from __future__ import annotations
+from fastapi import APIRouter, Depends, HTTPException
 
-from typing import Optional
+from app.core.storage import JsonStorage
+from app.models import ConversationItem
+from app.services.conversation_engine import ConversationEngine
 
-from david.database.json_store import JSONStore
-from david.utils.helpers import new_id, now_iso, clip_text
-
-store = JSONStore("conversations")
+router = APIRouter(prefix="/conversations", tags=["conversations"])
 
 
-def record_conversation(
-    message: str,
-    reply: str,
-    user_id: Optional[str] = None,
-    project_id: Optional[str] = None,
-    provider: Optional[str] = None,
-    task_type: Optional[str] = None,
+def get_engine() -> ConversationEngine:
+    return ConversationEngine(JsonStorage())
+
+
+@router.get("", response_model=list[ConversationItem])
+def list_conversations(engine: ConversationEngine = Depends(get_engine)) -> list[ConversationItem]:
+    return engine.all()
+
+
+@router.post("", response_model=ConversationItem)
+def create_conversation(
+    title: str = "New conversation",
+    engine: ConversationEngine = Depends(get_engine),
+) -> ConversationItem:
+    return engine.create(title=title)
+
+
+@router.get("/{conversation_id}", response_model=ConversationItem)
+def get_conversation(
+    conversation_id: str,
+    engine: ConversationEngine = Depends(get_engine),
+) -> ConversationItem:
+    conversation = engine.get(conversation_id)
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conversation
+
+
+@router.post("/{conversation_id}/clear")
+def clear_conversation(
+    conversation_id: str,
+    engine: ConversationEngine = Depends(get_engine),
+) -> dict[str, bool]:
+    ok = engine.clear(conversation_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"ok": True}
+
+
+@router.get("/{conversation_id}/export")
+def export_conversation(
+    conversation_id: str,
+    engine: ConversationEngine = Depends(get_engine),
 ) -> dict:
-    entry = {
-        "id": new_id("conv"),
-        "user_id": user_id,
-        "project_id": project_id,
-        "provider": provider,
-        "task_type": task_type,
-        "title": clip_text(message, 80),
-        "messages": [
-            {"role": "user", "content": message},
-            {"role": "assistant", "content": reply},
-        ],
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-    }
-    store.add(entry)
-    return entry
+    data = engine.export(conversation_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return data
 
 
-def list_conversations(user_id: Optional[str] = None) -> list[dict]:
-    if user_id is None:
-        return store.all()
-    return store.find(lambda c: c.get("user_id") == user_id)
-
-
-def get_conversation(conversation_id: str) -> Optional[dict]:
-    return store.get(conversation_id)
-
-
-def count(user_id: Optional[str] = None) -> int:
-    return len(list_conversations(user_id))
-
-
-def append_message(conversation_id: str, role: str, content: str) -> Optional[dict]:
-    convo = store.get(conversation_id)
-    if convo is None:
-        return None
-    messages = convo.get("messages", [])
-    messages.append({"role": role, "content": content})
-    return store.update(conversation_id, {"messages": messages, "updated_at": now_iso()})
+@router.delete("/{conversation_id}")
+def delete_conversation(
+    conversation_id: str,
+    engine: ConversationEngine = Depends(get_engine),
+) -> dict[str, bool]:
+    ok = engine.delete(conversation_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"ok": True}

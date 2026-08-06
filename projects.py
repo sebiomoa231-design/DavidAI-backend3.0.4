@@ -1,52 +1,41 @@
-"""Project management (Section 9)."""
-from typing import List, Optional
+from fastapi import APIRouter, Depends
 
-from david.database.json_store import JSONStore
-from david.utils.helpers import new_id, now_iso
+from app.core.storage import JsonStorage
+from app.models import ProjectCreate, ProjectItem, TaskCreate, TaskItem
+from app.services.project_service import ProjectService, TaskService
 
-store = JSONStore("projects")
-
-
-def create_project(name: str, description: str = "", goals: Optional[List[str]] = None, user_id: Optional[str] = None) -> dict:
-    project = {
-        "id": new_id("proj"),
-        "user_id": user_id,
-        "name": name,
-        "description": description,
-        "goals": goals or [],
-        "decisions": [],
-        "milestones": [],
-        "blockers": [],
-        "linked_tasks": [],
-        "linked_conversations": [],
-        "linked_files": [],
-        "created_at": now_iso(),
-        "updated_at": now_iso(),
-    }
-    store.add(project)
-    return project
+router = APIRouter(prefix="/projects", tags=["projects"])
 
 
-def list_projects(user_id: Optional[str] = None) -> List[dict]:
-    if user_id is None:
-        return store.all()
-    return store.find(lambda p: p.get("user_id") == user_id)
+def get_project_service() -> ProjectService:
+    return ProjectService(JsonStorage())
 
 
-def get_project(project_id: str) -> Optional[dict]:
-    return store.get(project_id)
+def get_task_service() -> TaskService:
+    return TaskService(JsonStorage())
 
 
-def update_project(project_id: str, **fields) -> Optional[dict]:
-    fields["updated_at"] = now_iso()
-    return store.update(project_id, fields)
+@router.get("", response_model=list[ProjectItem])
+def list_projects(service: ProjectService = Depends(get_project_service)) -> list[ProjectItem]:
+    return service.all()
 
 
-def link_task(project_id: str, task_id: str) -> Optional[dict]:
-    project = store.get(project_id)
-    if not project:
-        return None
-    linked = project.get("linked_tasks", [])
-    if task_id not in linked:
-        linked.append(task_id)
-    return store.update(project_id, {"linked_tasks": linked, "updated_at": now_iso()})
+@router.post("", response_model=ProjectItem)
+def create_project(
+    payload: ProjectCreate,
+    service: ProjectService = Depends(get_project_service),
+) -> ProjectItem:
+    return service.create(payload)
+
+
+@router.get("/tasks", response_model=list[TaskItem])
+def list_tasks(service: TaskService = Depends(get_task_service)) -> list[TaskItem]:
+    return service.all()
+
+
+@router.post("/tasks", response_model=TaskItem)
+def create_task(
+    payload: TaskCreate,
+    service: TaskService = Depends(get_task_service),
+) -> TaskItem:
+    return service.create(payload)

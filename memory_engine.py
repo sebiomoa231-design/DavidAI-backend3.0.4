@@ -1,121 +1,185 @@
-"""
-Memory engine (Section 8).
+from __future__ import annotations
 
-Handles storage and retrieval across memory types: short-term, working,
-long-term, project, decision, knowledge, preference, task, conversation.
-
-Relevance scoring here is intentionally simple (keyword overlap) so it works
-with zero external dependencies. It can later be swapped for embeddings
-without changing the public interface (add / search / update / forget).
-"""
 import re
-from typing import List, Optional
+from datetime import datetime
+from uuid import uuid4
 
-from david.database.json_store import JSONStore
-from david.utils.helpers import new_id, now_iso
-from david.utils.logger import get_logger
-
-logger = get_logger("david.memory")
-
-VALID_TYPES = {
-    "short_term",
-    "working",
-    "long_term",
-    "project",
-    "decision",
-    "knowledge",
-    "preference",
-    "task",
-    "conversation",
-}
+from app.core.storage import JsonStorage
+from app.models import MemoryCreate, MemoryItem, MemoryType
 
 _STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "to", "of", "and", "or",
-    "in", "on", "for", "with", "i", "you", "it", "this", "that", "my", "me",
+    "for", "in", "on", "at", "it", "this", "that", "i", "my", "me", "with",
 }
 
-
-def _tokenize(text: str) -> set:
-    words = re.findall(r"[a-zA-Z0-9']+", text.lower())
-    return {w for w in words if w not in _STOPWORDS and len(w) > 1}
+_LEARN_PATTERNS: list[tuple[str, MemoryType]] = [
+    (r"\bi prefer\b|\bi like\b|\bi want\b", "preference"),
+    (r"\bwe decided\b|\bi decided\b|\blet's go with\b", "decision"),
+    (r"\bremember\b|\bdon't forget\b|\balways\b|\bnever\b", "instruction"),
+    (r"\bproject\b", "project"),
+    (r"\btask\b|\btodo\b", "task"),
+]
 
 
 class MemoryEngine:
-    def __init__(self):
-        self.store = JSONStore("memories")
+    """
+    Long-term memory store supporting semantic memory, project memory,
+    preferences, instructions, decisions, knowledge, and experiences.
 
-    def add(
+    Backed by JSON storage today; the public API is stable so storage
+    can later move to PostgreSQL (or a vector store for `relevant()`)
+    without changing callers.
+    """
+
+    def __init__(self, storage: JsonStorage) -> None:
+        self.storage = storage
+
+    def _load(self) -> list[dict]:
+        return self.storage.read("memories", [])
+
+    def _save(self, memories: list[dict]) -> None:
+        self.storage.write("memories", memories)
+
+    def add(self, payload: MemoryCreate) -> MemoryItem:
+        item = MemoryItem(id=str(uuid4()), **payload.model_dump())
+        memories = self._load()
+        memories.append(item.model_dump(mode="json"))
+        self._save(memories)
+        return item
+
+    def all(self, include_archived: bool = False) -> list[MemoryItem]:
+        items = [MemoryItem(**m) for m in self._load()]
+        if include_archived:
+            return items
+        return [m for m in items if m.status == "active"]
+
+    def get(self, memory_id: str) -> MemoryItem | None:
+        for m in self._load():
+            if m.get("id") == memory_id:
+                return MemoryItem(**m)
+        return None
+
+    def update(
         self,
-        content: str,
-        memory_type: str = "long_term",
-        user_id: Optional[str] = None,
-        project_id: Optional[str] = None,
-        tags: Optional[List[str]] = None,
-        source: str = "user",
-    ) -> dict:
-        memory_type = memory_type if memory_type in VALID_TYPES else "long_term"
+        memory_id: str,
+        content: str | None = None,
+        importance: float | None = None,
+        confidence: float | None = None,
+        tags: list[str] | None = None,
+    ) -> MemoryItem | None:
+        memories = self._load()
+        updated = None
+        for m in memories:
+            if m.get("id") == memory_id:
+                if content is not None:
+                    m["content"] = content
+                if importance is not None:
+                    m["importance"] = importance
+                if confidence is not None:
+                    m["confidence"] = confidence
+                if tags is not None:
+                    m["tags"] = tags
+                m["updated_at"] = datetime.utcnow().isoformat()
+                updated = m
+                break
+        if updated:
+            self._save(memories)
+            return MemoryItem(**updated)
+        return None
 
-        # Deduplication: skip near-identical existing memories for this user.
-        existing = self.store.find(
-            lambda m: m.get("user_id") == user_id and m.get("content", "").strip().lower() == content.strip().lower()
-        )
-        if existing:
-            logger.info("duplicate memory skipped")
-            return existing[0]
+    def delete(self, memory_id: str) -> bool:
+        memories = self._load()
+        remaining = [m for m in memories if m.get("id") != memory_id]
+        if len(remaining) == len(memories):
+            return False
+        self._save(remaining)
+        return True
 
-        record = {
-            "id": new_id("mem"),
-            "content": content,
-            "type": memory_type,
-            "user_id": user_id,
-            "project_id": project_id,
-            "tags": tags or [],
-            "source": source,
-            "created_at": now_iso(),
-            "updated_at": now_iso(),
-        }
-        self.store.add(record)
-        return record
+    def archive(self, memory_id: str) -> bool:
+        memories = self._load()
+        found = False
+        for m in memories:
+            if m.get("id") == memory_id:
+                m["status"] = "archived"
+                m["updated_at"] = datetime.utcnow().isoformat()
+                found = True
+                break
+        if found:
+            self._save(memories)
+        return found
 
-    def search(self, query: str, user_id: Optional[str] = None, limit: int = 10) -> List[dict]:
-        """Keyword-overlap relevance search. Returns highest-scoring memories first."""
-        query_tokens = _tokenize(query)
-        if not query_tokens:
+    def search(self, query: str, limit: int = 20) -> list[MemoryItem]:
+        query_terms = {t for t in re.findall(r"\w+", query.lower()) if t not in _STOPWORDS}
+        if not query_terms:
             return []
 
-        candidates = self.store.find(lambda m: user_id is None or m.get("user_id") == user_id)
-
-        scored = []
-        for m in candidates:
-            content_tokens = _tokenize(m.get("content", ""))
-            overlap = len(query_tokens & content_tokens)
-            if overlap > 0:
-                scored.append((overlap, m))
+        scored: list[tuple[int, dict]] = []
+        for m in self._load():
+            if m.get("status") != "active":
+                continue
+            haystack = f"{m.get('content', '')} {' '.join(m.get('tags', []))}".lower()
+            score = sum(1 for term in query_terms if term in haystack)
+            if score > 0:
+                scored.append((score, m))
 
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        return [m for _, m in scored[:limit]]
+        return [MemoryItem(**m) for _, m in scored[:limit]]
 
-    def get(self, memory_id: str) -> Optional[dict]:
-        return self.store.get(memory_id)
+    def recent(self, limit: int = 10, memory_type: MemoryType | None = None) -> list[MemoryItem]:
+        items = self.all()
+        if memory_type:
+            items = [m for m in items if m.type == memory_type]
+        items.sort(key=lambda m: m.created_at, reverse=True)
+        return items[:limit]
 
-    def all(self, user_id: Optional[str] = None) -> List[dict]:
-        if user_id is None:
-            return self.store.all()
-        return self.store.find(lambda m: m.get("user_id") == user_id)
+    def relevant(self, context: str, limit: int = 5) -> list[MemoryItem]:
+        """
+        Rank active memories by relevance to a block of context text,
+        weighting keyword overlap by each memory's stored importance.
+        """
+        context_terms = {t for t in re.findall(r"\w+", context.lower()) if t not in _STOPWORDS}
+        if not context_terms:
+            return self.recent(limit=limit)
 
-    def update(self, memory_id: str, content: Optional[str] = None, tags: Optional[List[str]] = None) -> Optional[dict]:
-        patch = {"updated_at": now_iso()}
-        if content is not None:
-            patch["content"] = content
-        if tags is not None:
-            patch["tags"] = tags
-        return self.store.update(memory_id, patch)
+        scored: list[tuple[float, dict]] = []
+        for m in self._load():
+            if m.get("status") != "active":
+                continue
+            haystack = f"{m.get('content', '')} {' '.join(m.get('tags', []))}".lower()
+            overlap = sum(1 for term in context_terms if term in haystack)
+            if overlap == 0:
+                continue
+            score = overlap * (1 + float(m.get("importance", 0.5)))
+            scored.append((score, m))
 
-    def forget(self, memory_id: str) -> bool:
-        return self.store.delete(memory_id)
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        return [MemoryItem(**m) for _, m in scored[:limit]]
 
-    def count(self, user_id: Optional[str] = None) -> int:
-        return len(self.all(user_id))
+    def learn_from_text(self, text: str, source: str = "conversation") -> list[MemoryItem]:
+        """
+        Lightweight pattern-based extraction that turns a chunk of
+        conversation text into candidate memories. Intended to run
+        after each chat turn; safe to call with plain, unstructured text.
+        """
+        learned: list[MemoryItem] = []
+        lowered = text.lower()
 
+        matched_type: MemoryType = "general"
+        for pattern, mem_type in _LEARN_PATTERNS:
+            if re.search(pattern, lowered):
+                matched_type = mem_type
+                break
 
-memory_engine = MemoryEngine()
+        if matched_type == "general" and len(text.strip()) < 12:
+            return learned
+
+        candidate = MemoryCreate(
+            type=matched_type,
+            content=text.strip(),
+            confidence=0.6,
+            importance=0.5,
+            source=source,
+            tags=[],
+        )
+        learned.append(self.add(candidate))
+        return learned
